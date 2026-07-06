@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "Folio",
+  "version": "0.1.5",
+  "description": "A local read-only file agent bridge for ChatGPT.",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting",
+    "offscreen"
+  ],
+  "host_permissions": [
+    "https://chatgpt.com/*"
+  ],
+  "action": {
+    "default_title": "Folio",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "128": "icons/icon128.png"
+  }
+}

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Folio</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="app">
+      <header class="hero">
+        <div>
+          <h1>Folio</h1>
+          <p>Read-only local files for ChatGPT.</p>
+        </div>
+        <label class="switch" title="When on, the next ChatGPT prompt starts a Folio agent task.">
+          <input id="enabled" type="checkbox" />
+          <span></span>
+        </label>
+      </header>
+
+      <section class="card">
+        <div class="row">
+          <div>
+            <h2>Workspace</h2>
+            <p id="workspaceStatus">No folder selected.</p>
+          </div>
+          <button id="selectFolder" type="button">Select</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Limits</h2>
+        <div class="grid">
+          <label>
+            Tool calls
+            <input id="maxToolCalls" type="number" min="1" step="1" />
+          </label>
+          <label>
+            List items
+            <input id="maxListItems" type="number" min="1" step="1" />
+          </label>
+          <label>
+            File KB
+            <input id="maxFileSizeKb" type="number" min="1" step="1" />
+          </label>
+          <label>
+            Total KB
+            <input id="maxTotalKb" type="number" min="1" step="1" />
+          </label>
+        </div>
+        <label class="wide">
+          Large folders to truncate
+          <textarea id="largeDirs" rows="2" spellcheck="false"></textarea>
+        </label>
+      </section>
+
+
+      <section class="card">
+        <h2>Instructions</h2>
+        <p class="muted">Bootstrap is sent once per conversation. Short reminders keep the protocol fresh.</p>
+        <div class="grid">
+          <label>
+            Reminder messages
+            <input id="reminderUserMessages" type="number" min="1" step="1" />
+          </label>
+          <label>
+            Reminder tokens
+            <input id="reminderApproxTokens" type="number" min="500" step="100" />
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Sensitive files</h2>
+        <p class="muted">Folio asks every time before sending sensitive content.</p>
+        <label class="wide">
+          Name patterns
+          <textarea id="sensitiveNamePatterns" rows="4" spellcheck="false"></textarea>
+        </label>
+        <label class="wide">
+          Content patterns
+          <textarea id="sensitiveContentPatterns" rows="4" spellcheck="false"></textarea>
+        </label>
+      </section>
+
+      <footer>
+        <button id="save" type="button" class="primary">Save</button>
+        <button id="stop" type="button" class="danger">Stop agent</button>
+      </footer>
+
+      <p id="message" class="message" role="status"></p>
+    </main>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
