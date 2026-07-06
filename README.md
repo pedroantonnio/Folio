@@ -181,7 +181,7 @@ This project is currently intended for local development and manual installation
 1. Clone this repository:
 
 ```bash
-git clone https://github.com/pedroantonnio/Folio.git
+git clone https://github.com/YOUR_USERNAME/folio.git
 cd folio
 ```
 
