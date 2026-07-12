@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Folio",
-  "version": "0.2.0",
-  "description": "A read-only local file bridge for ChatGPT.",
+  "version": "0.3.2",
+  "description": "A local file bridge for ChatGPT.",
   "permissions": [
     "storage",
     "tabs",
@@ -34,6 +34,18 @@
         "content/chatgpt.js"
       ],
       "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "lib/idb.js",
+        "workspace-picker.html",
+        "workspace-picker.js"
+      ],
+      "matches": [
+        "https://chatgpt.com/*"
+      ]
     }
   ]
 }

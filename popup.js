@@ -1,10 +1,6 @@
-import { saveWorkspaceHandle, clearWorkspaceHandle } from "./lib/idb.js";
 import { DEFAULT_SETTINGS, normalizeSettings } from "./lib/defaults.js";
 
 const els = {
-  enabled: document.getElementById("enabled"),
-  selectFolder: document.getElementById("selectFolder"),
-  workspaceStatus: document.getElementById("workspaceStatus"),
   maxToolCalls: document.getElementById("maxToolCalls"),
   maxListItems: document.getElementById("maxListItems"),
   maxFileSizeKb: document.getElementById("maxFileSizeKb"),
@@ -27,17 +23,13 @@ init();
 
 async function init() {
   await loadSettings();
-  await refreshWorkspaceStatus();
-  els.enabled.addEventListener("change", saveSettings);
   els.save.addEventListener("click", saveSettings);
-  els.selectFolder.addEventListener("click", selectFolder);
   els.stop.addEventListener("click", stopAgentInActiveTab);
 }
 
 async function loadSettings() {
   const stored = await chrome.storage.local.get("settings");
   const settings = normalizeSettings(stored.settings || DEFAULT_SETTINGS);
-  els.enabled.checked = Boolean(settings.enabled);
   els.maxToolCalls.value = settings.maxToolCalls;
   els.maxListItems.value = settings.maxListItems;
   els.maxFileSizeKb.value = settings.maxFileSizeKb;
@@ -55,7 +47,7 @@ async function loadSettings() {
 
 async function saveSettings() {
   const settings = normalizeSettings({
-    enabled: els.enabled.checked,
+    enabled: true,
     maxToolCalls: Number(els.maxToolCalls.value),
     maxListItems: Number(els.maxListItems.value),
     maxFileSizeKb: Number(els.maxFileSizeKb.value),
@@ -73,47 +65,6 @@ async function saveSettings() {
   });
   await chrome.runtime.sendMessage({ type: "FOLIO_SAVE_SETTINGS", settings });
   showMessage("Saved.");
-}
-
-async function selectFolder() {
-  if (!window.showDirectoryPicker) {
-    showMessage("This Chrome version does not support folder selection.");
-    return;
-  }
-  try {
-    const handle = await window.showDirectoryPicker({ mode: "read" });
-    const permission = await handle.requestPermission({ mode: "read" });
-    if (permission !== "granted") {
-      showMessage("Folder permission was not granted.");
-      return;
-    }
-    await saveWorkspaceHandle(handle);
-    await chrome.storage.local.set({ workspaceName: handle.name || "Selected folder" });
-    await chrome.runtime.sendMessage({ type: "FOLIO_PREPARE_OFFSCREEN" }).catch(() => null);
-    try {
-      const channel = new BroadcastChannel("folio-workspace");
-      channel.postMessage({ type: "FOLIO_SET_WORKSPACE_HANDLE", handle, name: handle.name || "Selected folder" });
-      setTimeout(() => channel.close(), 500);
-    } catch (broadcastError) {
-      console.warn("Folio could not broadcast workspace handle", broadcastError);
-    }
-    await refreshWorkspaceStatus();
-    showMessage("Workspace connected.");
-  } catch (error) {
-    if (error?.name === "AbortError") return;
-    console.error(error);
-    showMessage(`Could not select folder: ${error?.message || error}`);
-    await clearWorkspaceHandle().catch(() => {});
-  }
-}
-
-async function refreshWorkspaceStatus() {
-  const status = await chrome.runtime.sendMessage({ type: "FOLIO_GET_WORKSPACE_STATUS" });
-  if (!status?.hasWorkspace) {
-    els.workspaceStatus.textContent = "No folder selected.";
-    return;
-  }
-  els.workspaceStatus.textContent = `${status.name} · ${status.permission}`;
 }
 
 async function stopAgentInActiveTab() {

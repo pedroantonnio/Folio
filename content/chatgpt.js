@@ -7,6 +7,7 @@
     stopButton: 'button[data-testid="stop-button"]',
     uploadFiles: 'input#upload-files[type="file"]',
     uploadPhotos: 'input[data-testid="upload-photos-input"], input#upload-photos',
+    composerForm: 'form[data-type="unified-composer"]',
     assistantTurn: 'section[data-turn="assistant"]',
     assistantMessage: '[data-message-author-role="assistant"]'
   };
@@ -24,16 +25,27 @@
   let settingsCache = null;
   let programmaticSend = false;
   let currentTask = null;
-  let injected = false;
+  let currentConversationKey = null;
+  let currentConversationMode = "paused";
+  let pendingNewChatMode = "paused";
+  let composerControlInjected = false;
+  let lastKnownCanonicalUrl = null;
+  let composerObserver = null;
+  let workspacePickerWindow = null;
+  let workspacePickerRequestId = null;
 
   init();
 
   async function init() {
     settingsCache = await getSettings();
     chrome.storage.onChanged.addListener((changes, area) => {
-      if (area === "local" && changes.settings) {
+      if (area !== "local") return;
+      if (changes.settings) {
         settingsCache = normalizeClientSettings(changes.settings.newValue || {});
-        renderBadge();
+        updateComposerControl();
+      }
+      if (changes.workspaceName) {
+        updateFolioMenu();
       }
     });
 
@@ -47,7 +59,15 @@
 
     document.addEventListener("click", onDocumentClick, true);
     document.addEventListener("keydown", onDocumentKeydown, true);
-    renderBadge();
+    document.addEventListener("click", onGlobalClickForFolioMenu, false);
+    window.addEventListener("resize", repositionOpenFolioMenu, { passive: true });
+    document.addEventListener("scroll", repositionOpenFolioMenu, true);
+    window.addEventListener("message", onWindowMessageForFolioWorkspace, false);
+
+    installUrlWatcher();
+    installComposerObserver();
+    await syncConversationMode();
+    ensureComposerControl();
   }
 
   async function getSettings() {
@@ -62,7 +82,7 @@
 
   function normalizeClientSettings(raw) {
     return {
-      enabled: Boolean(raw.enabled),
+      enabled: true,
       maxToolCalls: positiveInt(raw.maxToolCalls, 30),
       reminderUserMessages: positiveInt(raw.reminderUserMessages, 8),
       reminderApproxTokens: positiveInt(raw.reminderApproxTokens, 6000)
@@ -75,7 +95,8 @@
   }
 
   function onDocumentClick(event) {
-    if (programmaticSend || currentTask || !settingsCache?.enabled) return;
+    if (event.target?.closest?.("#folio-composer-control, #folio-composer-menu, #folio-approval-modal")) return;
+    if (programmaticSend || currentTask || currentConversationMode !== "active") return;
     const button = event.target?.closest?.(SELECTORS.sendButton);
     if (!button) return;
     const userText = getComposerText();
@@ -87,7 +108,7 @@
   }
 
   function onDocumentKeydown(event) {
-    if (programmaticSend || currentTask || !settingsCache?.enabled) return;
+    if (programmaticSend || currentTask || currentConversationMode !== "active") return;
     if (event.key !== "Enter" || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
     const composer = getComposer();
     if (!composer || !composer.contains(event.target)) return;
@@ -102,13 +123,13 @@
   function handleTaskError(error) {
     console.error("Folio task failed", error);
     currentTask = null;
-    setBadgeState("error");
+    setComposerControlState("error");
   }
 
   async function startTask(userText) {
     const taskId = crypto.randomUUID();
     currentTask = { id: taskId, stopped: false, toolCalls: 0 };
-    setBadgeState("active");
+    setComposerControlState("running");
     await chrome.runtime.sendMessage({ type: "FOLIO_RESET_TASK", taskId });
 
     const instructionPlan = await buildInstructionPlan(userText);
@@ -116,7 +137,7 @@
     await sendTextToChat(instructionPlan.prompt);
     await recordInstructionPlan(instructionPlan);
     await runLoop(assistantCountBefore);
-    await syncConversationStateFromDom();
+    await syncConversationMode();
   }
 
   async function runLoop(assistantCountBefore) {
@@ -128,7 +149,7 @@
       const call = parseToolCall(assistantText);
       if (!call) {
         currentTask = null;
-        setBadgeState("idle");
+        setComposerControlState(currentConversationMode);
         return;
       }
 
@@ -317,16 +338,17 @@
   }
 
   async function buildInstructionPlan(userText) {
-    const key = getConversationKey();
-    const state = await getConversationState(key);
-    const dom = analyzeFolioConversationDom();
-    const hasBootstrap = dom.hasBootstrap || Boolean(state?.hasBootstrap);
-    const protocolVersion = state?.protocolVersion || (dom.hasBootstrap ? 2 : null);
+    const key = await getConversationKey();
+    const state = key ? await getConversationState(key) : null;
+    const bootstrapped = Boolean(state?.bootstrapped || state?.hasBootstrap);
+    const protocolVersion = Number(state?.protocolVersion || 0);
 
-    if (!hasBootstrap || protocolVersion !== 2) return { type: "bootstrap", key, prompt: buildBootstrapPrompt(userText), userText };
+    if (!bootstrapped || protocolVersion !== 2) {
+      return { type: "bootstrap", key, prompt: buildBootstrapPrompt(userText), userText };
+    }
 
-    const messagesSinceInstruction = dom.hasInstruction ? dom.userMessagesSinceLastInstruction : positiveInt(state?.userMessagesSinceInstruction, 0);
-    const tokensSinceInstruction = dom.hasInstruction ? dom.approxTokensSinceLastInstruction : positiveInt(state?.approxTokensSinceInstruction, 0);
+    const messagesSinceInstruction = positiveInt(state?.userMessagesSinceInstruction, 0);
+    const tokensSinceInstruction = positiveInt(state?.approxTokensSinceInstruction, 0);
     if (messagesSinceInstruction >= settingsCache.reminderUserMessages || tokensSinceInstruction >= settingsCache.reminderApproxTokens) {
       return { type: "reminder", key, prompt: buildReminderPrompt(userText), userText };
     }
@@ -335,30 +357,34 @@
   }
 
   async function recordInstructionPlan(plan) {
-    const key = getConversationKey();
+    const key = plan.key || await waitForConversationKey(12000);
     if (!key) return;
+
     if (plan.type === "bootstrap" || plan.type === "reminder") {
-      await saveConversationState(key, { hasBootstrap: true, bootstrapVersion: 2, protocolVersion: 2, lastInstructionType: plan.type, userMessagesSinceInstruction: 0, approxTokensSinceInstruction: 0 });
+      await saveConversationState(key, {
+        mode: "active",
+        bootstrapped: true,
+        hasBootstrap: true,
+        bootstrapVersion: 2,
+        protocolVersion: 2,
+        lastInstructionType: plan.type,
+        userMessagesSinceInstruction: 0,
+        approxTokensSinceInstruction: 0
+      });
+      await syncConversationMode();
       return;
     }
+
     const state = await getConversationState(key);
     await saveConversationState(key, {
-      hasBootstrap: Boolean(state?.hasBootstrap) || analyzeFolioConversationDom().hasBootstrap,
+      mode: "active",
+      bootstrapped: Boolean(state?.bootstrapped || state?.hasBootstrap),
       bootstrapVersion: state?.bootstrapVersion || 2,
       protocolVersion: state?.protocolVersion || 2,
       userMessagesSinceInstruction: positiveInt(state?.userMessagesSinceInstruction, 0) + 1,
       approxTokensSinceInstruction: positiveInt(state?.approxTokensSinceInstruction, 0) + approxTokenCount(plan.userText)
     });
-  }
-
-  async function syncConversationStateFromDom() {
-    const key = getConversationKey();
-    if (!key) return;
-    const dom = analyzeFolioConversationDom();
-    if (!dom.hasBootstrap && !dom.hasInstruction) return;
-    const patch = { hasBootstrap: dom.hasBootstrap, userMessagesSinceInstruction: dom.userMessagesSinceLastInstruction, approxTokensSinceInstruction: dom.approxTokensSinceLastInstruction };
-    if (dom.hasBootstrap) { patch.bootstrapVersion = 2; patch.protocolVersion = 2; }
-    await saveConversationState(key, patch);
+    await syncConversationMode();
   }
 
   async function getConversationState(key) {
@@ -373,30 +399,40 @@
     catch (error) { console.warn("Folio could not save conversation state", error); return null; }
   }
 
-  function getConversationKey() {
-    const match = location.pathname.match(/^\/c\/([^/?#]+)/);
-    return match?.[1] ? `chatgpt:${match[1]}` : null;
+  async function getConversationKey() {
+    const canonicalUrl = getCanonicalConversationUrl();
+    if (!canonicalUrl) return null;
+    return sha256Hex(canonicalUrl);
   }
 
-  function analyzeFolioConversationDom() {
-    const turns = Array.from(document.querySelectorAll("section[data-turn]"));
-    let hasBootstrap = false, hasInstruction = false, userMessagesSinceLastInstruction = 0, approxTokensSinceLastInstruction = 0;
-    for (const turn of turns) {
-      const text = turn.innerText || "";
-      const containsBootstrap = text.includes(FOLIO_BOOTSTRAP_MARKER);
-      const containsReminder = text.includes(FOLIO_REMINDER_MARKER);
-      if (containsBootstrap) hasBootstrap = true;
-      if (containsBootstrap || containsReminder) {
-        hasInstruction = true;
-        userMessagesSinceLastInstruction = 0;
-        approxTokensSinceLastInstruction = 0;
-        continue;
-      }
-      if (!hasInstruction) continue;
-      approxTokensSinceLastInstruction += approxTokenCount(text);
-      if (turn.getAttribute("data-turn") === "user") userMessagesSinceLastInstruction += 1;
+  function getCanonicalConversationUrl() {
+    try {
+      const url = new URL(location.href);
+      // A blank ChatGPT composer does not yet identify a durable conversation.
+      // Keep it transient so every new chat starts Paused by default.
+      if (url.hostname === "chatgpt.com" && !/^\/c\/[^/?#]+/.test(url.pathname)) return null;
+      // Hash the full canonical URL without the fragment. Keeping search params
+      // makes the scheme reusable for other AI sites later.
+      return `${url.origin}${url.pathname}${url.search}`;
+    } catch {
+      return null;
     }
-    return { hasBootstrap, hasInstruction, userMessagesSinceLastInstruction, approxTokensSinceLastInstruction };
+  }
+
+  async function waitForConversationKey(timeoutMs) {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const key = await getConversationKey();
+      if (key) return key;
+      await delay(250);
+    }
+    return null;
+  }
+
+  async function sha256Hex(value) {
+    const bytes = new TextEncoder().encode(String(value || ""));
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, "0")).join("");
   }
 
   function approxTokenCount(text) { return Math.ceil(String(text || "").length / 4); }
@@ -486,28 +522,455 @@
     }
     document.querySelector(SELECTORS.stopButton)?.click();
     currentTask = null;
-    setBadgeState("idle");
+    setComposerControlState(currentConversationMode);
   }
 
-  function renderBadge() {
-    if (injected) { setBadgeState(currentTask ? "active" : "idle"); return; }
-    const badge = document.createElement("div");
-    badge.id = "folio-status-badge";
-    badge.title = "Folio local file agent";
-    badge.style.cssText = ["position:fixed", "right:14px", "bottom:14px", "z-index:2147483000", "padding:7px 10px", "border-radius:999px", "font:12px -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif", "box-shadow:0 6px 22px rgba(0,0,0,.18)", "transition:opacity .2s, background .2s", "pointer-events:none"].join(";");
-    document.documentElement.appendChild(badge);
-    injected = true;
-    setBadgeState("idle");
+  function installUrlWatcher() {
+    const notify = () => setTimeout(syncConversationMode, 50);
+    for (const method of ["pushState", "replaceState"]) {
+      const original = history[method];
+      if (original.__folioPatched) continue;
+      const patched = function (...args) {
+        const value = original.apply(this, args);
+        notify();
+        return value;
+      };
+      patched.__folioPatched = true;
+      history[method] = patched;
+    }
+    window.addEventListener("popstate", notify);
+    setInterval(() => {
+      const canonical = getCanonicalConversationUrl();
+      if (canonical !== lastKnownCanonicalUrl) syncConversationMode();
+      ensureComposerControl();
+    }, 1000);
   }
 
-  function setBadgeState(state) {
-    const badge = document.getElementById("folio-status-badge");
-    if (!badge) return;
-    if (!settingsCache?.enabled) { badge.style.opacity = "0"; return; }
-    badge.style.opacity = "1";
-    if (state === "active") { badge.textContent = "Folio running"; badge.style.background = "#34c759"; badge.style.color = "#061b08"; return; }
-    if (state === "error") { badge.textContent = "Folio error"; badge.style.background = "#ff453a"; badge.style.color = "#fff"; return; }
-    badge.textContent = "Folio on"; badge.style.background = "Canvas"; badge.style.color = "CanvasText";
+  function installComposerObserver() {
+    if (composerObserver) return;
+    composerObserver = new MutationObserver(() => {
+      clearTimeout(installComposerObserver.timer);
+      installComposerObserver.timer = setTimeout(ensureComposerControl, 100);
+    });
+    composerObserver.observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+  async function syncConversationMode() {
+    const canonical = getCanonicalConversationUrl();
+    lastKnownCanonicalUrl = canonical;
+    const key = await getConversationKey();
+    currentConversationKey = key;
+
+    if (!key) {
+      currentConversationMode = pendingNewChatMode;
+      updateComposerControl();
+      return;
+    }
+
+    const state = await getConversationState(key);
+    if (!state?.mode && pendingNewChatMode === "active") {
+      await saveConversationState(key, { mode: "active", bootstrapped: false, protocolVersion: 2 });
+      pendingNewChatMode = "paused";
+      currentConversationMode = "active";
+      updateComposerControl();
+      return;
+    }
+
+    currentConversationMode = state?.mode === "active" ? "active" : "paused";
+    pendingNewChatMode = "paused";
+    updateComposerControl();
+  }
+
+  async function setConversationMode(mode) {
+    const normalized = mode === "active" ? "active" : "paused";
+    const key = await getConversationKey();
+
+    if (!key) {
+      pendingNewChatMode = normalized;
+      currentConversationMode = normalized;
+      updateComposerControl();
+      return;
+    }
+
+    const state = await getConversationState(key);
+    await saveConversationState(key, {
+      mode: normalized,
+      bootstrapped: Boolean(state?.bootstrapped || state?.hasBootstrap),
+      bootstrapVersion: state?.bootstrapVersion,
+      protocolVersion: state?.protocolVersion || 2
+    });
+    currentConversationMode = normalized;
+    currentConversationKey = key;
+    updateComposerControl();
+  }
+
+  function ensureComposerControl() {
+    let control = document.getElementById("folio-composer-control");
+    if (control?.isConnected) {
+      updateComposerControl();
+      return control;
+    }
+
+    const form = document.querySelector(SELECTORS.composerForm);
+    if (!form) return null;
+
+    control = buildComposerControl();
+    const anchorPill = form.querySelector(".__composer-pill");
+    const anchorOuter = anchorPill ? findComposerPillOuter(anchorPill) : null;
+
+    if (anchorOuter?.parentElement) {
+      anchorOuter.parentElement.insertBefore(control, anchorOuter.nextSibling);
+    } else {
+      const trailing = form.querySelector("button[data-testid='send-button'], button[data-testid='stop-button']")?.parentElement?.parentElement;
+      if (trailing) trailing.insertBefore(control, trailing.firstChild);
+      else form.appendChild(control);
+    }
+
+    composerControlInjected = true;
+    updateComposerControl();
+    return control;
+  }
+
+  function findComposerPillOuter(pill) {
+    let node = pill.parentElement;
+    for (let i = 0; node && i < 8; i += 1, node = node.parentElement) {
+      if (node.classList?.contains("relative") && node.classList?.contains("ms-1")) return node;
+    }
+    return pill.parentElement;
+  }
+
+  function buildComposerControl() {
+    injectComposerControlStyles();
+    const control = document.createElement("div");
+    control.id = "folio-composer-control";
+    control.className = "relative ms-1 flex items-center gap-1.5";
+    control.innerHTML = `
+      <div>
+        <button type="button" id="folio-composer-button" class="__composer-pill __composer-pill--neutral text-body-regular! group/pill" data-tone="neutral" aria-haspopup="menu" aria-expanded="false">
+          <span class="max-w-40 truncate [[data-collapse-labels]_&]:sr-only">
+            <span class="flex max-w-40 min-w-0 items-center gap-1 [[data-collapse-labels]_&]:sr-only">
+              <span id="folio-composer-dot" aria-hidden="true"></span>
+              <span id="folio-composer-label" class="text-token-text-tertiary min-w-0 truncate">Folio Paused</span>
+            </span>
+          </span>
+          <span id="folio-composer-chevron" aria-hidden="true"><i class="hgi hgi-stroke hgi-rounded hgi-arrow-down-01" aria-hidden="true"></i></span>
+        </button>
+      </div>`;
+    control.querySelector("button").addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleFolioMenu();
+    });
+    return control;
+  }
+
+  function injectComposerControlStyles() {
+    if (document.getElementById("folio-composer-styles")) return;
+    const style = document.createElement("style");
+    style.id = "folio-composer-styles";
+    style.textContent = `
+      #folio-composer-button{gap:6px;min-height:36px;}
+      #folio-composer-dot{display:inline-block;width:7px;height:7px;border-radius:999px;background:var(--text-tertiary,#8f8f8f);flex:0 0 auto;}
+      #folio-composer-button[data-folio-state="active"] #folio-composer-dot{background:#34c759;}
+      #folio-composer-button[data-folio-state="running"] #folio-composer-dot{background:#34c759;box-shadow:0 0 0 3px rgba(52,199,89,.18);}
+      #folio-composer-button[data-folio-state="error"] #folio-composer-dot{background:#ff453a;}
+      #folio-composer-chevron{display:inline-flex;align-items:center;justify-content:center;line-height:1;color:var(--text-tertiary,#8f8f8f);margin-left:2px;flex:0 0 auto;}
+      #folio-composer-chevron .hgi{display:inline-block;position:relative;width:16px;height:16px;font-size:16px;line-height:16px;}
+      #folio-composer-chevron .hgi:before{content:"";position:absolute;left:4px;top:5px;width:7px;height:7px;border-right:1.7px solid currentColor;border-bottom:1.7px solid currentColor;transform:rotate(45deg);box-sizing:border-box;}
+      #folio-composer-menu{position:fixed;z-index:2147483600;min-width:230px;max-width:min(300px,calc(100vw - 24px));border-radius:16px;padding:6px;background:var(--bg-elevated-primary,var(--bg-primary,Canvas));color:var(--text-primary,CanvasText);box-shadow:0 20px 50px rgba(0,0,0,.24);border:1px solid var(--border-light,rgba(127,127,127,.18));font-family:var(--font-sans,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);font-size:14px;box-sizing:border-box;}
+      #folio-composer-menu[hidden]{display:none;}
+      #folio-composer-menu .folio-menu-label{font-size:12px;color:var(--text-tertiary,#8f8f8f);padding:6px 10px 4px;font-weight:600;}
+      #folio-composer-menu .folio-menu-item{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;border:0;background:transparent;color:inherit;border-radius:10px;padding:9px 10px;text-align:left;font:inherit;cursor:pointer;}
+      #folio-composer-menu .folio-menu-item:hover{background:var(--surface-hover,rgba(127,127,127,.12));}
+      #folio-composer-menu .folio-menu-muted{color:var(--text-tertiary,#8f8f8f);font-size:12px;padding:2px 10px 8px;line-height:1.3;}
+      #folio-composer-menu .folio-menu-separator{height:1px;background:var(--border-light,rgba(127,127,127,.18));margin:4px 8px;}
+      #folio-composer-menu .folio-check{width:18px;text-align:center;color:#34c759;}
+    `;
+    document.documentElement.appendChild(style);
+  }
+
+  function updateComposerControl() {
+    const button = document.getElementById("folio-composer-button");
+    const label = document.getElementById("folio-composer-label");
+    if (!button || !label) return;
+    const state = currentTask ? "running" : currentConversationMode;
+    button.dataset.folioState = state;
+    label.textContent = state === "running" ? "Folio Running" : state === "active" ? "Folio Active" : state === "error" ? "Folio Error" : "Folio Paused";
+    updateFolioMenu();
+  }
+
+  function setComposerControlState(state) {
+    if (state === "running" || state === "error") {
+      const button = document.getElementById("folio-composer-button");
+      const label = document.getElementById("folio-composer-label");
+      if (button && label) {
+        button.dataset.folioState = state;
+        label.textContent = state === "running" ? "Folio Running" : "Folio Error";
+      }
+      updateFolioMenu();
+      return;
+    }
+    updateComposerControl();
+  }
+
+  function toggleFolioMenu() {
+    let menu = document.getElementById("folio-composer-menu");
+    if (!menu) menu = buildFolioMenu();
+    if (!menu.hidden) {
+      closeFolioMenu();
+      return;
+    }
+    positionFolioMenu(menu);
+    menu.hidden = false;
+    document.getElementById("folio-composer-button")?.setAttribute("aria-expanded", "true");
+    updateFolioMenu();
+  }
+
+  function closeFolioMenu() {
+    const menu = document.getElementById("folio-composer-menu");
+    if (menu) menu.hidden = true;
+    document.getElementById("folio-composer-button")?.setAttribute("aria-expanded", "false");
+  }
+
+  function repositionOpenFolioMenu() {
+    const menu = document.getElementById("folio-composer-menu");
+    if (!menu || menu.hidden) return;
+    clearTimeout(repositionOpenFolioMenu.timer);
+    repositionOpenFolioMenu.timer = setTimeout(() => positionFolioMenu(menu), 40);
+  }
+
+  function onGlobalClickForFolioMenu(event) {
+    if (event.target?.closest?.("#folio-composer-control, #folio-composer-menu")) return;
+    closeFolioMenu();
+  }
+
+  function buildFolioMenu() {
+    const menu = document.createElement("div");
+    menu.id = "folio-composer-menu";
+    menu.hidden = true;
+    menu.setAttribute("role", "menu");
+    menu.innerHTML = `
+      <div class="folio-menu-label">Folio</div>
+      <button type="button" class="folio-menu-item" data-folio-action="active"><span>Active for this chat</span><span class="folio-check" data-check="active"></span></button>
+      <button type="button" class="folio-menu-item" data-folio-action="paused"><span>Paused for this chat</span><span class="folio-check" data-check="paused"></span></button>
+      <div class="folio-menu-separator"></div>
+      <div class="folio-menu-label">Status</div>
+      <div class="folio-menu-muted" id="folio-menu-status">Loading…</div>
+      <div class="folio-menu-separator"></div>
+      <button type="button" class="folio-menu-item" data-folio-action="select-folder"><span>Select folder</span><span></span></button>
+      <button type="button" class="folio-menu-item" data-folio-action="stop"><span>Stop current agent</span><span></span></button>
+      <button type="button" class="folio-menu-item" data-folio-action="settings"><span>Open settings</span><span></span></button>`;
+    menu.addEventListener("click", async (event) => {
+      const item = event.target.closest("[data-folio-action]");
+      if (!item) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const action = item.dataset.folioAction;
+      try {
+        if (action === "active" || action === "paused") {
+          await setConversationMode(action);
+          closeFolioMenu();
+          return;
+        }
+        if (action === "stop") {
+          stopCurrentTask();
+          closeFolioMenu();
+          return;
+        }
+        if (action === "settings") {
+          await openFolioSettings();
+          closeFolioMenu();
+          return;
+        }
+        if (action === "select-folder") {
+          await selectWorkspaceFromComposer();
+          return;
+        }
+      } catch (error) {
+        console.warn("Folio menu action failed", error);
+      }
+    });
+    document.documentElement.appendChild(menu);
+    return menu;
+  }
+
+  function positionFolioMenu(menu) {
+    const button = document.getElementById("folio-composer-button");
+    if (!button || !menu) return;
+
+    const margin = 12;
+    const gap = 8;
+    const rect = button.getBoundingClientRect();
+    const viewportWidth = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0);
+    const viewportHeight = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0);
+    const maxAllowedWidth = Math.max(160, viewportWidth - margin * 2);
+
+    const wasHidden = menu.hidden;
+    const previousVisibility = menu.style.visibility;
+    const previousWidth = menu.style.width;
+    const previousMaxHeight = menu.style.maxHeight;
+    const previousOverflowY = menu.style.overflowY;
+
+    if (wasHidden) menu.hidden = false;
+    menu.style.visibility = "hidden";
+    menu.style.width = "auto";
+    menu.style.maxHeight = "none";
+    menu.style.overflowY = "visible";
+    menu.style.left = "0px";
+    menu.style.top = "0px";
+
+    const measuredWidth = Math.ceil(menu.getBoundingClientRect().width || 230);
+    const width = Math.min(maxAllowedWidth, Math.max(230, Math.min(300, measuredWidth)));
+    menu.style.width = `${width}px`;
+
+    const naturalHeight = Math.ceil(menu.getBoundingClientRect().height || 0);
+    const spaceBelow = Math.max(0, viewportHeight - rect.bottom - gap - margin);
+    const spaceAbove = Math.max(0, rect.top - gap - margin);
+
+    let opensUp = false;
+    let availableHeight = spaceBelow;
+    if (naturalHeight <= spaceBelow) {
+      opensUp = false;
+      availableHeight = spaceBelow;
+    } else if (naturalHeight <= spaceAbove) {
+      opensUp = true;
+      availableHeight = spaceAbove;
+    } else {
+      opensUp = spaceAbove > spaceBelow;
+      availableHeight = opensUp ? spaceAbove : spaceBelow;
+    }
+
+    const left = Math.max(margin, Math.min(viewportWidth - width - margin, rect.right - width));
+    const usableHeight = Math.max(0, Math.floor(availableHeight));
+    const renderedHeight = Math.min(naturalHeight, usableHeight);
+    let top = opensUp ? rect.top - gap - renderedHeight : rect.bottom + gap;
+    top = Math.max(margin, Math.min(viewportHeight - renderedHeight - margin, top));
+
+    menu.style.left = `${Math.round(left)}px`;
+    menu.style.top = `${Math.round(top)}px`;
+    menu.style.width = `${Math.round(width)}px`;
+    menu.style.maxHeight = `${usableHeight}px`;
+    menu.style.overflowY = naturalHeight > usableHeight ? "auto" : "visible";
+    menu.dataset.side = opensUp ? "top" : "bottom";
+
+    menu.style.visibility = previousVisibility || "";
+    if (wasHidden) menu.hidden = true;
+
+    // Keep deterministic layout properties even when the menu was measured while hidden.
+    if (!menu.style.width) menu.style.width = previousWidth;
+    if (!menu.style.maxHeight) menu.style.maxHeight = previousMaxHeight;
+    if (!menu.style.overflowY) menu.style.overflowY = previousOverflowY;
+  }
+
+  async function selectWorkspaceFromComposer() {
+    const status = document.querySelector("#folio-menu-status");
+    try {
+      if (status) {
+        status.textContent = "Workspace: Opening folder picker…";
+        status.style.whiteSpace = "pre-line";
+      }
+
+      workspacePickerRequestId = crypto.randomUUID();
+      const pickerUrl = `${chrome.runtime.getURL("workspace-picker.html")}?requestId=${encodeURIComponent(workspacePickerRequestId)}`;
+      workspacePickerWindow = window.open(
+        pickerUrl,
+        "folio-workspace-picker",
+        "popup,width=460,height=320"
+      );
+
+      if (!workspacePickerWindow) {
+        if (status) {
+          status.textContent = "Workspace: Could not open folder picker. Allow popups for this site and try again.";
+          status.style.whiteSpace = "pre-line";
+        }
+        console.warn("Folio could not open the workspace picker window.");
+        return;
+      }
+
+      try { workspacePickerWindow.focus(); } catch {}
+      watchWorkspacePickerClosed(workspacePickerRequestId);
+    } catch (error) {
+      console.warn("Folio could not start workspace selection from composer", error);
+      if (status) {
+        status.textContent = `Workspace: Could not open folder picker. ${error?.message || error}`;
+        status.style.whiteSpace = "pre-line";
+      }
+    }
+  }
+
+  function onWindowMessageForFolioWorkspace(event) {
+    const extensionOrigin = new URL(chrome.runtime.getURL("/")).origin;
+    if (event.origin !== extensionOrigin) return;
+
+    const message = event.data || {};
+    if (message.type !== "FOLIO_WORKSPACE_PICKER_RESULT") return;
+    if (workspacePickerRequestId && message.requestId && message.requestId !== workspacePickerRequestId) return;
+
+    workspacePickerRequestId = null;
+    workspacePickerWindow = null;
+
+    const status = document.querySelector("#folio-menu-status");
+    if (!message.ok) {
+      if (message.cancelled) {
+        updateFolioMenu();
+        return;
+      }
+
+      console.warn("Folio workspace picker returned an error", message.error);
+      if (status) {
+        status.textContent = `Workspace: Could not connect folder. ${message.error || "Unknown error."}`;
+        status.style.whiteSpace = "pre-line";
+      }
+      return;
+    }
+
+    updateFolioMenu();
+  }
+
+  function watchWorkspacePickerClosed(requestId) {
+    const timer = setInterval(() => {
+      if (requestId !== workspacePickerRequestId) {
+        clearInterval(timer);
+        return;
+      }
+
+      let closed = false;
+      try { closed = !workspacePickerWindow || workspacePickerWindow.closed; }
+      catch { closed = true; }
+
+      if (!closed) return;
+      clearInterval(timer);
+      workspacePickerWindow = null;
+      workspacePickerRequestId = null;
+      updateFolioMenu();
+    }, 500);
+  }
+
+  async function updateFolioMenu() {
+    const menu = document.getElementById("folio-composer-menu");
+    if (!menu) return;
+    menu.querySelector('[data-check="active"]').textContent = currentConversationMode === "active" ? "✓" : "";
+    menu.querySelector('[data-check="paused"]').textContent = currentConversationMode !== "active" ? "✓" : "";
+    const status = menu.querySelector("#folio-menu-status");
+    if (status) {
+      const workspace = await chrome.runtime.sendMessage({ type: "FOLIO_GET_WORKSPACE_STATUS" }).catch((error) => {
+        console.warn("Folio could not read workspace status", error);
+        return null;
+      });
+      const workspaceText = workspace?.hasWorkspace ? workspace.name : "No workspace connected";
+      const permissionText = workspace?.hasWorkspace ? workspace.permission : "missing";
+      const urlText = currentConversationKey ? "Saved for this URL" : "New chat · not saved yet";
+      status.textContent = `Workspace: ${workspaceText}
+Permission: ${permissionText}
+Mode: ${currentConversationMode === "active" ? "Active" : "Paused"}
+${urlText}`;
+      status.style.whiteSpace = "pre-line";
+    }
+    if (!menu.hidden) positionFolioMenu(menu);
+  }
+
+  async function openFolioSettings() {
+    await chrome.runtime.sendMessage({ type: "FOLIO_OPEN_POPUP" }).catch(() => null);
   }
 
   function waitForElement(selector, timeoutMs) { return waitUntil(() => document.querySelector(selector), timeoutMs); }

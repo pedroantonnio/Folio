@@ -31,6 +31,11 @@ async function handleOffscreenMessage(message) {
     case "FOLIO_OFFSCREEN_WORKSPACE_STATUS":
       return getWorkspaceStatus();
 
+    case "FOLIO_OFFSCREEN_REFRESH_WORKSPACE_HANDLE":
+      workspaceHandle = null;
+      workspaceName = null;
+      return getWorkspaceStatus();
+
     case "FOLIO_OFFSCREEN_RESET_TASK": {
       const taskId = requireTaskId(message.taskId);
       taskState.set(taskId, { totalBytes: 0, toolCalls: 0, stopped: false });
@@ -91,11 +96,11 @@ async function executeTool(message) {
   }
 
   const root = await getCurrentWorkspaceHandle();
-  if (!root) return toolResult(call, "error", "No local folder is connected. Open Folio and select a folder first.");
+  if (!root) return toolResult(call, "error", "No local folder is connected. Use the Folio dropdown in ChatGPT and select a folder first.");
 
   const permission = await root.queryPermission({ mode: "read" });
   if (permission !== "granted") {
-    return toolResult(call, "error", "Local folder permission is not currently active. Open Folio and reconnect the folder.");
+    return toolResult(call, "error", "Local folder permission is not currently active. Use the Folio dropdown in ChatGPT and select the folder again.");
   }
 
   switch (call.tool) {

@@ -34,6 +34,15 @@ async function handleMessage(message) {
       return { ok: true, settings };
     }
 
+    case "FOLIO_OPEN_POPUP": {
+      try {
+        await chrome.action.openPopup();
+        return { ok: true };
+      } catch (error) {
+        return { ok: false, error: String(error?.message || error) };
+      }
+    }
+
     case "FOLIO_GET_CONVERSATION_STATE": {
       return { ok: true, state: await getConversationState(message.key) };
     }
@@ -51,6 +60,13 @@ async function handleMessage(message) {
     case "FOLIO_GET_WORKSPACE_STATUS": {
       await ensureOffscreenDocument();
       const status = await sendToOffscreen({ type: "FOLIO_OFFSCREEN_WORKSPACE_STATUS" });
+      if (status?.hasWorkspace) return status;
+      return getFallbackWorkspaceStatus();
+    }
+
+    case "FOLIO_REFRESH_WORKSPACE_HANDLE": {
+      await ensureOffscreenDocument();
+      const status = await sendToOffscreen({ type: "FOLIO_OFFSCREEN_REFRESH_WORKSPACE_HANDLE" });
       if (status?.hasWorkspace) return status;
       return getFallbackWorkspaceStatus();
     }
