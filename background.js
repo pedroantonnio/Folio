@@ -28,6 +28,12 @@ async function handleMessage(message) {
       return { ok: true, settings: await getSettings() };
     }
 
+    case "FOLIO_SAVE_SETTINGS": {
+      const settings = normalizeSettings(message.settings || {});
+      await chrome.storage.local.set({ settings });
+      return { ok: true, settings };
+    }
+
     case "FOLIO_GET_CONVERSATION_STATE": {
       return { ok: true, state: await getConversationState(message.key) };
     }
@@ -35,13 +41,6 @@ async function handleMessage(message) {
     case "FOLIO_SAVE_CONVERSATION_STATE": {
       const state = await saveConversationState(message.key, message.patch || {});
       return { ok: true, state };
-    }
-
-
-    case "FOLIO_SAVE_SETTINGS": {
-      const settings = normalizeSettings(message.settings || {});
-      await chrome.storage.local.set({ settings });
-      return { ok: true, settings };
     }
 
     case "FOLIO_PREPARE_OFFSCREEN": {
@@ -74,6 +73,7 @@ async function handleMessage(message) {
         taskId: message.taskId,
         call: message.call,
         sensitiveDecision: message.sensitiveDecision,
+        attachmentDecision: message.attachmentDecision,
         settings
       });
     }
@@ -118,7 +118,7 @@ async function ensureOffscreenDocument() {
   await chrome.offscreen.createDocument({
     url: OFFSCREEN_URL,
     reasons: ["LOCAL_STORAGE"],
-    justification: "Keep the selected local folder handle active while Folio executes read-only file tools for the current ChatGPT agent loop."
+    justification: "Keep the selected local folder handle active while Folio executes local file tools for the current ChatGPT agent loop."
   });
 }
 
@@ -137,9 +137,12 @@ async function saveConversationState(key, patch) {
   const stored = await chrome.storage.local.get("conversationStates");
   const conversationStates = stored.conversationStates || {};
   const previous = conversationStates[key] || {};
+  const cleanPatch = Object.fromEntries(
+    Object.entries(patch || {}).filter(([, value]) => value !== undefined)
+  );
   const next = {
     ...previous,
-    ...patch,
+    ...cleanPatch,
     updatedAt: Date.now()
   };
   conversationStates[key] = next;

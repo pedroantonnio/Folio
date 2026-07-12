@@ -9,6 +9,10 @@ const els = {
   maxListItems: document.getElementById("maxListItems"),
   maxFileSizeKb: document.getElementById("maxFileSizeKb"),
   maxTotalKb: document.getElementById("maxTotalKb"),
+  maxSearchResults: document.getElementById("maxSearchResults"),
+  maxGrepResults: document.getElementById("maxGrepResults"),
+  maxGrepFileSizeKb: document.getElementById("maxGrepFileSizeKb"),
+  maxAttachSizeKb: document.getElementById("maxAttachSizeKb"),
   reminderUserMessages: document.getElementById("reminderUserMessages"),
   reminderApproxTokens: document.getElementById("reminderApproxTokens"),
   largeDirs: document.getElementById("largeDirs"),
@@ -24,7 +28,6 @@ init();
 async function init() {
   await loadSettings();
   await refreshWorkspaceStatus();
-
   els.enabled.addEventListener("change", saveSettings);
   els.save.addEventListener("click", saveSettings);
   els.selectFolder.addEventListener("click", selectFolder);
@@ -34,12 +37,15 @@ async function init() {
 async function loadSettings() {
   const stored = await chrome.storage.local.get("settings");
   const settings = normalizeSettings(stored.settings || DEFAULT_SETTINGS);
-
   els.enabled.checked = Boolean(settings.enabled);
   els.maxToolCalls.value = settings.maxToolCalls;
   els.maxListItems.value = settings.maxListItems;
   els.maxFileSizeKb.value = settings.maxFileSizeKb;
   els.maxTotalKb.value = Math.round(settings.maxTotalBytes / 1024);
+  els.maxSearchResults.value = settings.maxSearchResults;
+  els.maxGrepResults.value = settings.maxGrepResults;
+  els.maxGrepFileSizeKb.value = settings.maxGrepFileSizeKb;
+  els.maxAttachSizeKb.value = settings.maxAttachSizeKb;
   els.reminderUserMessages.value = settings.reminderUserMessages;
   els.reminderApproxTokens.value = settings.reminderApproxTokens;
   els.largeDirs.value = settings.largeDirs.join("\n");
@@ -54,6 +60,10 @@ async function saveSettings() {
     maxListItems: Number(els.maxListItems.value),
     maxFileSizeKb: Number(els.maxFileSizeKb.value),
     maxTotalBytes: Number(els.maxTotalKb.value) * 1024,
+    maxSearchResults: Number(els.maxSearchResults.value),
+    maxGrepResults: Number(els.maxGrepResults.value),
+    maxGrepFileSizeKb: Number(els.maxGrepFileSizeKb.value),
+    maxAttachSizeKb: Number(els.maxAttachSizeKb.value),
     maxListDepth: DEFAULT_SETTINGS.maxListDepth,
     reminderUserMessages: Number(els.reminderUserMessages.value),
     reminderApproxTokens: Number(els.reminderApproxTokens.value),
@@ -61,7 +71,6 @@ async function saveSettings() {
     sensitiveNamePatterns: lines(els.sensitiveNamePatterns.value),
     sensitiveContentPatterns: lines(els.sensitiveContentPatterns.value)
   });
-
   await chrome.runtime.sendMessage({ type: "FOLIO_SAVE_SETTINGS", settings });
   showMessage("Saved.");
 }
@@ -71,7 +80,6 @@ async function selectFolder() {
     showMessage("This Chrome version does not support folder selection.");
     return;
   }
-
   try {
     const handle = await window.showDirectoryPicker({ mode: "read" });
     const permission = await handle.requestPermission({ mode: "read" });
@@ -79,26 +87,16 @@ async function selectFolder() {
       showMessage("Folder permission was not granted.");
       return;
     }
-
     await saveWorkspaceHandle(handle);
     await chrome.storage.local.set({ workspaceName: handle.name || "Selected folder" });
-
-    // MV3 service workers can suspend between tool calls. Keep an offscreen
-    // extension document alive and pass the freshly-authorized handle to it so
-    // Folio does not lose the active folder during a ChatGPT agent loop.
     await chrome.runtime.sendMessage({ type: "FOLIO_PREPARE_OFFSCREEN" }).catch(() => null);
     try {
       const channel = new BroadcastChannel("folio-workspace");
-      channel.postMessage({
-        type: "FOLIO_SET_WORKSPACE_HANDLE",
-        handle,
-        name: handle.name || "Selected folder"
-      });
+      channel.postMessage({ type: "FOLIO_SET_WORKSPACE_HANDLE", handle, name: handle.name || "Selected folder" });
       setTimeout(() => channel.close(), 500);
     } catch (broadcastError) {
       console.warn("Folio could not broadcast workspace handle", broadcastError);
     }
-
     await refreshWorkspaceStatus();
     showMessage("Workspace connected.");
   } catch (error) {
@@ -115,7 +113,6 @@ async function refreshWorkspaceStatus() {
     els.workspaceStatus.textContent = "No folder selected.";
     return;
   }
-
   els.workspaceStatus.textContent = `${status.name} · ${status.permission}`;
 }
 
@@ -125,7 +122,6 @@ async function stopAgentInActiveTab() {
     showMessage("No active tab.");
     return;
   }
-
   try {
     await chrome.tabs.sendMessage(tab.id, { type: "FOLIO_STOP" });
     showMessage("Stop signal sent.");
@@ -135,16 +131,11 @@ async function stopAgentInActiveTab() {
 }
 
 function lines(value) {
-  return String(value || "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+  return String(value || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 }
 
 function showMessage(text) {
   els.message.textContent = text;
   clearTimeout(showMessage.timer);
-  showMessage.timer = setTimeout(() => {
-    els.message.textContent = "";
-  }, 2500);
+  showMessage.timer = setTimeout(() => { els.message.textContent = ""; }, 2500);
 }
