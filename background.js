@@ -58,17 +58,19 @@ async function handleMessage(message) {
     }
 
     case "FOLIO_GET_WORKSPACE_STATUS": {
+      const workspaceKey = await resolveWorkspaceKey(message);
       await ensureOffscreenDocument();
-      const status = await sendToOffscreen({ type: "FOLIO_OFFSCREEN_WORKSPACE_STATUS" });
+      const status = await sendToOffscreen({ type: "FOLIO_OFFSCREEN_WORKSPACE_STATUS", workspaceKey });
       if (status?.hasWorkspace) return status;
-      return getFallbackWorkspaceStatus();
+      return getFallbackWorkspaceStatus(workspaceKey);
     }
 
     case "FOLIO_REFRESH_WORKSPACE_HANDLE": {
+      const workspaceKey = await resolveWorkspaceKey(message);
       await ensureOffscreenDocument();
-      const status = await sendToOffscreen({ type: "FOLIO_OFFSCREEN_REFRESH_WORKSPACE_HANDLE" });
+      const status = await sendToOffscreen({ type: "FOLIO_OFFSCREEN_REFRESH_WORKSPACE_HANDLE", workspaceKey });
       if (status?.hasWorkspace) return status;
-      return getFallbackWorkspaceStatus();
+      return getFallbackWorkspaceStatus(workspaceKey);
     }
 
     case "FOLIO_RESET_TASK": {
@@ -84,12 +86,20 @@ async function handleMessage(message) {
     case "FOLIO_EXECUTE_TOOL": {
       await ensureOffscreenDocument();
       const settings = await getSettings();
+      const workspaceKey = await resolveWorkspaceKey(message);
+      if (!workspaceKey) {
+        return {
+          ok: true,
+          result: makeToolErrorResult(message.call, "No workspace is selected for this chat. Use the Folio dropdown and choose Select folder for this chat.")
+        };
+      }
       return sendToOffscreen({
         type: "FOLIO_OFFSCREEN_EXECUTE_TOOL",
         taskId: message.taskId,
         call: message.call,
         sensitiveDecision: message.sensitiveDecision,
         attachmentDecision: message.attachmentDecision,
+        workspaceKey,
         settings
       });
     }
@@ -104,8 +114,40 @@ async function getSettings() {
   return normalizeSettings(stored.settings || DEFAULT_SETTINGS);
 }
 
-async function getFallbackWorkspaceStatus() {
-  const handle = await getWorkspaceHandle();
+async function resolveWorkspaceKey(message) {
+  const directKey = normalizeWorkspaceKey(message?.workspaceKey);
+  if (directKey) return directKey;
+
+  const conversationKey = String(message?.conversationKey || "").trim();
+  if (!conversationKey) return null;
+
+  const state = await getConversationState(conversationKey);
+  return normalizeWorkspaceKey(state?.workspaceKey);
+}
+
+function normalizeWorkspaceKey(value) {
+  const key = String(value || "").trim();
+  return key || null;
+}
+
+function makeToolErrorResult(call, message) {
+  const rawCall = call && typeof call === "object" ? call : {};
+  return {
+    tool: String(rawCall.tool || "unknown"),
+    path: String(rawCall.path || "."),
+    query: rawCall.query ? String(rawCall.query) : undefined,
+    status: "error",
+    message
+  };
+}
+
+async function getFallbackWorkspaceStatus(workspaceKey) {
+  const key = normalizeWorkspaceKey(workspaceKey);
+  if (!key) {
+    return { ok: true, hasWorkspace: false, name: null, permission: "missing" };
+  }
+
+  const handle = await getWorkspaceHandle(key);
   if (!handle) {
     return { ok: true, hasWorkspace: false, name: null, permission: "missing" };
   }

@@ -32,3 +32,5 @@ button.danger { background: var(--danger); }
 footer { display: flex; gap: 8px; justify-content: flex-end; }
 .message { min-height: 18px; margin-top: 8px; font-size: 12px; }
 .muted { margin-bottom: 8px; font-size: 12px; }
+label.checkbox { flex-direction: row; align-items: center; gap: 8px; }
+label.checkbox input { width: auto; }

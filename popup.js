@@ -11,6 +11,7 @@ const els = {
   maxAttachSizeKb: document.getElementById("maxAttachSizeKb"),
   reminderUserMessages: document.getElementById("reminderUserMessages"),
   reminderApproxTokens: document.getElementById("reminderApproxTokens"),
+  hideTechnicalMessages: document.getElementById("hideTechnicalMessages"),
   largeDirs: document.getElementById("largeDirs"),
   sensitiveNamePatterns: document.getElementById("sensitiveNamePatterns"),
   sensitiveContentPatterns: document.getElementById("sensitiveContentPatterns"),
@@ -40,6 +41,7 @@ async function loadSettings() {
   els.maxAttachSizeKb.value = settings.maxAttachSizeKb;
   els.reminderUserMessages.value = settings.reminderUserMessages;
   els.reminderApproxTokens.value = settings.reminderApproxTokens;
+  els.hideTechnicalMessages.checked = settings.hideTechnicalMessages !== false;
   els.largeDirs.value = settings.largeDirs.join("\n");
   els.sensitiveNamePatterns.value = settings.sensitiveNamePatterns.join("\n");
   els.sensitiveContentPatterns.value = settings.sensitiveContentPatterns.join("\n");
@@ -59,6 +61,7 @@ async function saveSettings() {
     maxListDepth: DEFAULT_SETTINGS.maxListDepth,
     reminderUserMessages: Number(els.reminderUserMessages.value),
     reminderApproxTokens: Number(els.reminderApproxTokens.value),
+    hideTechnicalMessages: els.hideTechnicalMessages.checked,
     largeDirs: lines(els.largeDirs.value),
     sensitiveNamePatterns: lines(els.sensitiveNamePatterns.value),
     sensitiveContentPatterns: lines(els.sensitiveContentPatterns.value)

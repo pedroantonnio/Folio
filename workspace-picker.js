@@ -2,6 +2,7 @@ import { saveWorkspaceHandle } from "./lib/idb.js";
 
 const params = new URLSearchParams(location.search);
 const requestId = params.get("requestId") || "";
+const workspaceKey = params.get("workspaceKey") || `workspace:${crypto.randomUUID()}`;
 const statusEl = document.getElementById("status");
 const selectButton = document.getElementById("select");
 const cancelButton = document.getElementById("cancel");
@@ -47,21 +48,20 @@ async function selectWorkspace(autoAttempt) {
 
     const name = handle.name || "Selected folder";
     setStatus("Saving workspace…");
-    await saveWorkspaceHandle(handle);
-    await chrome.storage.local.set({ workspaceName: name });
+    await saveWorkspaceHandle(handle, workspaceKey);
 
     await chrome.runtime.sendMessage({ type: "FOLIO_PREPARE_OFFSCREEN" }).catch((error) => {
       console.warn("Folio could not prepare offscreen after workspace selection", error);
     });
 
-    const refresh = await chrome.runtime.sendMessage({ type: "FOLIO_REFRESH_WORKSPACE_HANDLE" }).catch((error) => {
+    const refresh = await chrome.runtime.sendMessage({ type: "FOLIO_REFRESH_WORKSPACE_HANDLE", workspaceKey }).catch((error) => {
       console.warn("Folio could not refresh offscreen workspace handle", error);
       return null;
     });
 
     try {
       const channel = new BroadcastChannel("folio-workspace");
-      channel.postMessage({ type: "FOLIO_SET_WORKSPACE_HANDLE", handle, name });
+      channel.postMessage({ type: "FOLIO_SET_WORKSPACE_HANDLE", workspaceKey, handle, name });
       setTimeout(() => channel.close(), 500);
     } catch (broadcastError) {
       console.warn("Folio workspace picker could not broadcast handle", broadcastError);
@@ -71,6 +71,7 @@ async function selectWorkspace(autoAttempt) {
     setStatus(`Workspace connected: ${name}`);
     postResult({
       ok: true,
+      workspaceKey,
       name,
       permission: refresh?.permission || permission
     });

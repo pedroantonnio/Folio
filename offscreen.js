@@ -1,16 +1,24 @@
 import { getWorkspaceHandle } from "./lib/idb.js";
 import { DEFAULT_SETTINGS, normalizeSettings } from "./lib/defaults.js";
 
-let workspaceHandle = null;
-let workspaceName = null;
+const workspaceCache = new Map();
 const taskState = new Map();
 
 const workspaceChannel = new BroadcastChannel("folio-workspace");
 workspaceChannel.addEventListener("message", (event) => {
   const message = event.data || {};
   if (message.type !== "FOLIO_SET_WORKSPACE_HANDLE") return;
-  workspaceHandle = message.handle || null;
-  workspaceName = message.name || workspaceHandle?.name || "Selected folder";
+  const workspaceKey = normalizeWorkspaceKey(message.workspaceKey);
+  if (!workspaceKey) return;
+  const handle = message.handle || null;
+  if (!handle) {
+    workspaceCache.delete(workspaceKey);
+    return;
+  }
+  workspaceCache.set(workspaceKey, {
+    handle,
+    name: message.name || handle.name || "Selected folder"
+  });
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -29,12 +37,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 async function handleOffscreenMessage(message) {
   switch (message.type) {
     case "FOLIO_OFFSCREEN_WORKSPACE_STATUS":
-      return getWorkspaceStatus();
+      return getWorkspaceStatus(message.workspaceKey);
 
-    case "FOLIO_OFFSCREEN_REFRESH_WORKSPACE_HANDLE":
-      workspaceHandle = null;
-      workspaceName = null;
-      return getWorkspaceStatus();
+    case "FOLIO_OFFSCREEN_REFRESH_WORKSPACE_HANDLE": {
+      const workspaceKey = normalizeWorkspaceKey(message.workspaceKey);
+      if (workspaceKey) workspaceCache.delete(workspaceKey);
+      return getWorkspaceStatus(workspaceKey);
+    }
 
     case "FOLIO_OFFSCREEN_RESET_TASK": {
       const taskId = requireTaskId(message.taskId);
@@ -60,25 +69,39 @@ function getSettingsFromMessage(message) {
   return normalizeSettings(message?.settings || DEFAULT_SETTINGS);
 }
 
-async function getCurrentWorkspaceHandle() {
-  if (workspaceHandle) return workspaceHandle;
-  workspaceHandle = await getWorkspaceHandle();
-  workspaceName = workspaceHandle?.name || workspaceName || "Selected folder";
-  return workspaceHandle;
+function normalizeWorkspaceKey(value) {
+  const key = String(value || "").trim();
+  return key || null;
 }
 
-async function getWorkspaceStatus() {
-  const handle = await getCurrentWorkspaceHandle();
-  if (!handle) return { ok: true, hasWorkspace: false, name: null, permission: "missing" };
+async function getCurrentWorkspaceEntry(workspaceKey) {
+  const key = normalizeWorkspaceKey(workspaceKey);
+  if (!key) return null;
+  if (workspaceCache.has(key)) return workspaceCache.get(key);
+
+  const handle = await getWorkspaceHandle(key);
+  if (!handle) return null;
+
+  const entry = { handle, name: handle.name || "Selected folder" };
+  workspaceCache.set(key, entry);
+  return entry;
+}
+
+async function getWorkspaceStatus(workspaceKey) {
+  const key = normalizeWorkspaceKey(workspaceKey);
+  if (!key) return { ok: true, hasWorkspace: false, name: null, permission: "missing" };
+
+  const entry = await getCurrentWorkspaceEntry(key);
+  if (!entry?.handle) return { ok: true, hasWorkspace: false, name: null, permission: "missing" };
 
   let permission = "unknown";
   try {
-    permission = await handle.queryPermission({ mode: "read" });
+    permission = await entry.handle.queryPermission({ mode: "read" });
   } catch (error) {
     permission = "error";
   }
 
-  return { ok: true, hasWorkspace: true, name: workspaceName || handle.name || "Selected folder", permission };
+  return { ok: true, hasWorkspace: true, name: entry.name || entry.handle.name || "Selected folder", permission };
 }
 
 async function executeTool(message) {
@@ -95,12 +118,14 @@ async function executeTool(message) {
     return toolResult(call, "error", `Tool call limit reached (${settings.maxToolCalls}).`);
   }
 
-  const root = await getCurrentWorkspaceHandle();
-  if (!root) return toolResult(call, "error", "No local folder is connected. Use the Folio dropdown in ChatGPT and select a folder first.");
+  const workspaceKey = normalizeWorkspaceKey(message.workspaceKey);
+  const workspaceEntry = await getCurrentWorkspaceEntry(workspaceKey);
+  const root = workspaceEntry?.handle || null;
+  if (!root) return toolResult(call, "error", "No workspace is selected for this chat. Use the Folio dropdown and choose Select folder for this chat.");
 
   const permission = await root.queryPermission({ mode: "read" });
   if (permission !== "granted") {
-    return toolResult(call, "error", "Local folder permission is not currently active. Use the Folio dropdown in ChatGPT and select the folder again.");
+    return toolResult(call, "error", "Local folder permission is not currently active for this chat. Use the Folio dropdown and select the folder again for this chat.");
   }
 
   switch (call.tool) {
